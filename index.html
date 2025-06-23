@@ -45,12 +45,54 @@
         let score = 0;
         let stage = 1;
         let cubesSpawnedThisStage = 0;
-        const CUBES_PER_STAGE = 50; // ★ 変更点: ステージクリアに必要なキューブ数を50に変更
-        let cubeSpeedMultiplier = 1.0; // キューブ速度のステージ倍率
+        let cubeSpeedMultiplier = 1.0;
 
         let cubeSpawnTimer = 0;
         let cubeSpawnInterval = 600;
 
+        // BGM関連の変数
+        let audioContext;
+        let bgmBuffer;
+        let bgmSourceNode;
+        let isBgmPlaying = false;
+
+        // --- BGMの読み込みと再生 ---
+        async function setupBGM() {
+            const bgmUrl = 'https://cdn.jsdelivr.net/gh/keigox68000/koorijigoku@main/koorijigoku.mp3';
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            try {
+                const response = await fetch(bgmUrl);
+                const arrayBuffer = await response.arrayBuffer();
+                bgmBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                console.log("BGMの準備が完了しました。");
+            } catch(e) {
+                console.error("BGMの読み込みに失敗しました:", e);
+                info.innerText = "BGMの読み込みに失敗しました";
+            }
+        }
+
+        function playBgm() {
+            if (isBgmPlaying || !bgmBuffer) return;
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            bgmSourceNode = audioContext.createBufferSource();
+            bgmSourceNode.buffer = bgmBuffer;
+            bgmSourceNode.loop = true;
+            bgmSourceNode.connect(audioContext.destination);
+            bgmSourceNode.start(0);
+            isBgmPlaying = true;
+            console.log("BGMを再生します。");
+        }
+        
+        function stopBgm() {
+            if (bgmSourceNode) {
+                bgmSourceNode.stop();
+                isBgmPlaying = false;
+                console.log("BGMを停止しました。");
+            }
+        }
+        
         // --- パーティクル ---
         const particles = [];
 
@@ -138,7 +180,7 @@
                 this.size = CUBE_SIZE;
                 this.x = canvas.width;
                 this.y = Math.random() * (canvas.height - this.size);
-                this.speed = (Math.random() * 150 + 225) * cubeSpeedMultiplier;
+                this.speed = (Math.random() * 120 + 180) * cubeSpeedMultiplier;
                 this.angle = 0;
                 this.rotationSpeed = (Math.random() - 0.5) * 4;
                 this.state = 'moving';
@@ -160,9 +202,6 @@
                     this.x -= this.speed * deltaTime;
                     this.y += this.vy * deltaTime;
                     this.angle += this.rotationSpeed * deltaTime;
-                    if ((this.y <= 0 && this.vy < 0) || (this.y + this.size >= canvas.height && this.vy > 0)) {
-                        this.vy *= -1;
-                    }
                 }
             }
 
@@ -185,22 +224,28 @@
         }
 
         // --- ステージ進行処理 ---
+        function getRequiredCubesForStage(currentStage) {
+            return 20 + (currentStage - 1) * 10;
+        }
+
         function nextStage() {
             stage++;
             cubesSpawnedThisStage = 0;
-            cubeSpeedMultiplier *= 1.10; // 速度を10%アップ
+            cubeSpeedMultiplier *= 1.10;
 
-            // 画面上の全キューブを爆発させる
             for (const cube of cubes) {
                  const rainbowColors = ['#ff0000', '#ff7f00', '#ffff00', '#00ff00', '#0000ff', '#4b0082', '#9400d3'];
                  createExplosion(cube.x + cube.size / 2, cube.y + cube.size / 2, 50, rainbowColors, { maxSpeed: 7 });
             }
-            cubes.length = 0; // 配列を空にする
+            cubes.length = 0;
         }
 
 
         // --- イベントリスナー ---
         window.addEventListener('keydown', (e) => {
+            if (!isBgmPlaying) {
+                playBgm();
+            }
             if (e.code === 'ControlLeft' && !keys[e.code]) {
                 e.preventDefault();
                 player.changeSpeed();
@@ -221,8 +266,30 @@
             }
             return false;
         }
+
         function checkCubeCollisions(movingCube) {
-            if (movingCube.x <= 0) { movingCube.x = 0; return true; }
+            // 壁との衝突
+            if (movingCube.x <= 0) {
+                movingCube.x = 0;
+                return true;
+            }
+            // ★ 変更点: 右の壁との衝突判定を削除
+            /*
+            if (movingCube.x + movingCube.size >= canvas.width) {
+                movingCube.x = canvas.width - movingCube.size;
+                return true;
+            }
+            */
+            if (movingCube.y <= 0) {
+                movingCube.y = 0;
+                return true;
+            }
+            if (movingCube.y + movingCube.size >= canvas.height) {
+                movingCube.y = canvas.height - movingCube.size;
+                return true;
+            }
+
+            // 他の停止したキューブとの衝突
             for (const stoppedCube of cubes) {
                 if (movingCube !== stoppedCube && stoppedCube.state === 'stopped') {
                     if (movingCube.x < stoppedCube.x + stoppedCube.size && movingCube.x + movingCube.size > stoppedCube.x &&
@@ -246,12 +313,11 @@
                 cubeSpawnTimer += deltaTime * 1000;
                 if (cubeSpawnTimer > cubeSpawnInterval) {
                     cubes.push(new Cube());
-                    cubesSpawnedThisStage++; // ステージ内のキューブ出現数をカウントアップ
+                    cubesSpawnedThisStage++;
                     cubeSpawnTimer = 0;
                     if (cubeSpawnInterval > 150) cubeSpawnInterval -= 5; 
 
-                    // ★ 変更点: ステージクリア判定を50に変更
-                    if (cubesSpawnedThisStage >= CUBES_PER_STAGE) {
+                    if (cubesSpawnedThisStage >= getRequiredCubesForStage(stage)) {
                         nextStage();
                     }
                 }
@@ -268,6 +334,7 @@
             
             if (gameState === 'playing' && checkPlayerCollision()) {
                 gameState = 'gameOver';
+                stopBgm();
                 player.visible = false; 
                 const rainbowColors = ['#ff0000', '#ff7f00', '#ffff00', '#00ff00', '#0000ff', '#4b0082', '#9400d3'];
                 createExplosion(player.x + player.width / 2, player.y, 150, rainbowColors, { maxSpeed: 10 });
@@ -300,8 +367,7 @@
             // 右上のUI
             ctx.textAlign = 'right';
             ctx.fillText(`STAGE: ${stage}`, canvas.width - 20, 40);
-             // ★ 変更点: UI表示を50に変更
-            ctx.fillText(`CUBES: ${cubesSpawnedThisStage} / ${CUBES_PER_STAGE}`, canvas.width - 20, 70);
+            ctx.fillText(`CUBES: ${cubesSpawnedThisStage} / ${getRequiredCubesForStage(stage)}`, canvas.width - 20, 70);
 
 
             if (gameState === 'gameOver') {
@@ -328,8 +394,9 @@
             requestAnimationFrame(gameLoop);
         }
 
-        // ゲーム開始
-        requestAnimationFrame(gameLoop);
+        // --- ゲーム開始 ---
+        setupBGM();
+        gameLoop(0);
     </script>
 </body>
 </html>
