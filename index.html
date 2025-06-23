@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>キューブアタック</title>
+    <title>納涼！氷地獄</title>
     <style>
         body {
             background-color: #000;
@@ -19,17 +19,20 @@
         canvas {
             border: 1px solid #0ff;
             background-color: #001;
+            cursor: pointer;
         }
         #info {
             margin-top: 16px;
             font-size: 1.2em;
             color: #aaa;
+            /* ★ 追加: 高さを確保してレイアウトの崩れを防ぐ */
+            min-height: 1.2em; 
         }
     </style>
 </head>
 <body>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
-    <div id="info">矢印キーで移動 / 左CTRLで速度変更</div>
+    <div id="info"></div>
 
     <script>
         // --- 初期設定 ---
@@ -38,8 +41,8 @@
         const info = document.getElementById('info');
 
         // --- ゲームの状態 ---
-        let gameState = 'playing'; // 'playing', 'gameOver'
-        let keys = {}; // 押されているキーを管理するオブジェクト
+        let gameState = 'title'; // 'title', 'playing', 'exploding', 'gameOver'
+        let keys = {};
         let lastTime = 0;
         
         let score = 0;
@@ -50,266 +53,245 @@
         let cubeSpawnTimer = 0;
         let cubeSpawnInterval = 600;
 
-        // BGM関連の変数
+        // オーディオ関連の変数
         let audioContext;
-        let bgmBuffer;
+        let bgmBuffer, bombSfxBuffer, kakinSfxBuffer;
         let bgmSourceNode;
+        let bgmGainNode;
+        let isAudioReady = false;
         let isBgmPlaying = false;
+        
+        // タイトル画面用
+        const titleCubes = [];
+        let blinkTimer = 0;
+        let showBlinkText = true;
 
-        // --- BGMの読み込みと再生 ---
-        async function setupBGM() {
-            const bgmUrl = 'https://cdn.jsdelivr.net/gh/keigox68000/koorijigoku@main/koorijigoku.mp3';
+        // --- オーディオの読み込みと再生 ---
+        async function loadAudio(url) {
+            const response = await fetch(url);
+            const arrayBuffer = await response.arrayBuffer();
+            return await audioContext.decodeAudioData(arrayBuffer);
+        }
+
+        async function setupAudio() {
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            bgmGainNode = audioContext.createGain();
+            bgmGainNode.connect(audioContext.destination);
+
             try {
-                const response = await fetch(bgmUrl);
-                const arrayBuffer = await response.arrayBuffer();
-                bgmBuffer = await audioContext.decodeAudioData(arrayBuffer);
-                console.log("BGMの準備が完了しました。");
+                const bgmUrl = 'https://cdn.jsdelivr.net/gh/keigox68000/koorijigoku@main/koorijigoku.mp3';
+                const bombUrl = 'https://cdn.jsdelivr.net/gh/keigox68000/koorijigoku@main/bomb.mp3';
+                const kakinUrl = 'https://cdn.jsdelivr.net/gh/keigox68000/koorijigoku@main/kakin.mp3';
+                
+                [bgmBuffer, bombSfxBuffer, kakinSfxBuffer] = await Promise.all([
+                    loadAudio(bgmUrl),
+                    loadAudio(bombUrl),
+                    loadAudio(kakinUrl)
+                ]);
+
+                isAudioReady = true;
+                console.log("全てのオーディオの準備が完了しました。");
             } catch(e) {
-                console.error("BGMの読み込みに失敗しました:", e);
-                info.innerText = "BGMの読み込みに失敗しました";
+                console.error("オーディオの読み込みに失敗しました:", e);
+                info.innerText = "オーディオの読み込みに失敗しました";
             }
         }
 
-        function playBgm() {
-            if (isBgmPlaying || !bgmBuffer) return;
+        function playSound(buffer, options = {}) {
+            if (!isAudioReady || !buffer) return;
             if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            const sourceNode = audioContext.createBufferSource();
+            sourceNode.buffer = buffer;
+            sourceNode.loop = options.loop || false;
+            const gainNode = audioContext.createGain();
+            gainNode.gain.value = options.volume !== undefined ? options.volume : 1.0;
+            sourceNode.connect(gainNode).connect(audioContext.destination);
+            sourceNode.start(0);
+            return sourceNode;
+        }
+        
+        function playBgm() {
+             if (isBgmPlaying || !isAudioReady || !bgmBuffer) return;
+             if (audioContext.state === 'suspended') {
                 audioContext.resume();
             }
             bgmSourceNode = audioContext.createBufferSource();
             bgmSourceNode.buffer = bgmBuffer;
             bgmSourceNode.loop = true;
-            bgmSourceNode.connect(audioContext.destination);
+            bgmSourceNode.connect(bgmGainNode);
+            bgmGainNode.gain.setValueAtTime(1.0, audioContext.currentTime);
             bgmSourceNode.start(0);
             isBgmPlaying = true;
-            console.log("BGMを再生します。");
         }
-        
-        function stopBgm() {
-            if (bgmSourceNode) {
-                bgmSourceNode.stop();
+
+        function stopBgmWithFadeOut() {
+            if (bgmGainNode && isBgmPlaying) {
+                bgmGainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 1.5);
                 isBgmPlaying = false;
-                console.log("BGMを停止しました。");
+                if (bgmSourceNode) {
+                    bgmSourceNode.stop(audioContext.currentTime + 1.5);
+                }
+                console.log("BGMをフェードアウトします。");
             }
         }
         
         // --- パーティクル ---
         const particles = [];
-
         class Particle {
-            constructor(x, y, color, options = {}) {
-                this.x = x;
-                this.y = y;
-                const angle = Math.random() * Math.PI * 2;
-                const speed = Math.random() * (options.maxSpeed || 5);
-                this.vx = Math.cos(angle) * speed;
-                this.vy = Math.sin(angle) * speed;
-                this.size = Math.random() * 2 + 2;
-                this.color = color;
-                this.lifespan = Math.random() * 60 + 40;
-                this.initialLifespan = this.lifespan;
-            }
-
-            update() {
-                this.lifespan--;
-                this.x += this.vx;
-                this.y += this.vy;
-                this.vx *= 0.96;
-                this.vy *= 0.96;
-            }
-
-            draw() {
-                ctx.save();
-                ctx.globalAlpha = this.lifespan / this.initialLifespan;
-                ctx.fillStyle = this.color;
-                ctx.fillRect(this.x, this.y, this.size, this.size);
-                ctx.restore();
-            }
+            constructor(x, y, color, options = {}) { this.x = x; this.y = y; const angle = Math.random() * Math.PI * 2; const speed = Math.random() * (options.maxSpeed || 5); this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed; this.size = Math.random() * 2 + 2; this.color = color; this.lifespan = Math.random() * 60 + 40; this.initialLifespan = this.lifespan; }
+            update() { this.lifespan--; this.x += this.vx; this.y += this.vy; this.vx *= 0.96; this.vy *= 0.96; }
+            draw() { ctx.save(); ctx.globalAlpha = this.lifespan / this.initialLifespan; ctx.fillStyle = this.color; ctx.fillRect(this.x, this.y, this.size, this.size); ctx.restore(); }
         }
-        
-        function createExplosion(x, y, count, colors, options) {
-            for (let i = 0; i < count; i++) {
-                const color = colors[Math.floor(Math.random() * colors.length)];
-                particles.push(new Particle(x, y, color, options));
-            }
-        }
+        function createExplosion(x, y, count, colors, options) { for (let i = 0; i < count; i++) { const color = colors[Math.floor(Math.random() * colors.length)]; particles.push(new Particle(x, y, color, options)); } }
 
         // --- 自機 ---
         const player = {
-            x: 100,
-            y: 300,
-            width: 45,
-            height: 30,
-            baseSpeed: 300,
-            speedLevel: 1,
-            speed: 300,
-            color: '#fff',
-            visible: true,
-            draw: function() {
-                if (!this.visible) return;
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.moveTo(this.x, this.y - this.height / 2);
-                ctx.lineTo(this.x + this.width, this.y + this.height / 2);
-                ctx.lineTo(this.x, this.y + this.height / 2);
-                ctx.closePath();
-                ctx.fill();
-            },
-            update: function(deltaTime) {
-                if (keys['ArrowUp'] && this.y > this.height / 2) this.y -= this.speed * deltaTime;
-                if (keys['ArrowDown'] && this.y < canvas.height - this.height / 2) this.y += this.speed * deltaTime;
-                if (keys['ArrowLeft'] && this.x > 0) this.x -= this.speed * deltaTime;
-                if (keys['ArrowRight'] && this.x < canvas.width - this.width) this.x += this.speed * deltaTime;
-            },
-            changeSpeed: function() {
-                this.speedLevel++;
-                if (this.speedLevel > 4) {
-                    this.speedLevel = 1;
-                }
-                const multipliers = [1.0, 1.5, 2.0, 2.5];
-                this.speed = this.baseSpeed * multipliers[this.speedLevel - 1];
-            }
+            x: 100, y: 300, width: 45, height: 30, baseSpeed: 300, speedLevel: 1, speed: 300, color: '#fff', visible: true,
+            draw: function() { if (!this.visible) return; ctx.fillStyle = this.color; ctx.beginPath(); ctx.moveTo(this.x, this.y - this.height / 2); ctx.lineTo(this.x + this.width, this.y + this.height / 2); ctx.lineTo(this.x, this.y + this.height / 2); ctx.closePath(); ctx.fill(); },
+            update: function(deltaTime) { if (keys['ArrowUp'] && this.y > this.height / 2) this.y -= this.speed * deltaTime; if (keys['ArrowDown'] && this.y < canvas.height - this.height / 2) this.y += this.speed * deltaTime; if (keys['ArrowLeft'] && this.x > 0) this.x -= this.speed * deltaTime; if (keys['ArrowRight'] && this.x < canvas.width - this.width) this.x += this.speed * deltaTime; },
+            changeSpeed: function() { this.speedLevel++; if (this.speedLevel > 4) { this.speedLevel = 1; } const multipliers = [1.0, 1.5, 2.0, 2.5]; this.speed = this.baseSpeed * multipliers[this.speedLevel - 1]; }
         };
 
         // --- キューブ ---
         const cubes = [];
         const CUBE_SIZE = 45; 
-
         class Cube {
-            constructor() {
-                this.size = CUBE_SIZE;
-                this.x = canvas.width;
-                this.y = Math.random() * (canvas.height - this.size);
-                this.speed = (Math.random() * 120 + 180) * cubeSpeedMultiplier;
-                this.angle = 0;
-                this.rotationSpeed = (Math.random() - 0.5) * 4;
-                this.state = 'moving';
-                this.color = '#0ff';
+            constructor(isTitleCube = false) { 
+                this.isTitleCube = isTitleCube; 
+                this.size = CUBE_SIZE; 
+                this.x = canvas.width; 
+                this.y = Math.random() * (canvas.height - this.size); 
+                const initialSpeed = (Math.random() * 120 + 180) * (isTitleCube ? 0.8 : cubeSpeedMultiplier);
+                this.vx = -initialSpeed;
                 this.vy = 0;
+                this.angle = 0; 
+                this.rotationSpeed = (Math.random() - 0.5) * 4; 
+                this.state = 'moving'; 
+                this.color = '#0ff'; 
                 this.hasAttacked = false;
+                // ★ 変更点: 後方攻撃のフラグを追加
+                this.hasRearAttacked = false;
             }
-
-            update(deltaTime, targetPlayer) {
+            update(deltaTime, targetPlayer) { 
                 if (this.state === 'moving') {
-                    if (!this.hasAttacked && this.x < canvas.width * 0.9) {
-                        if (Math.random() < 0.01) { 
-                            this.hasAttacked = true;
-                            this.speed *= 3.0;
+                    // 前方攻撃
+                    if (!this.isTitleCube && !this.hasAttacked && this.vx < 0 && this.x < canvas.width * 0.9) { 
+                        if (Math.random() < 0.01) {  
+                            this.hasAttacked = true; 
+                            const currentSpeed = Math.sqrt(this.vx**2 + this.vy**2);
+                            const newSpeed = currentSpeed * 3.0;
+                            const angleToPlayer = Math.atan2(targetPlayer.y - this.y, targetPlayer.x - this.x); 
+                            this.vx = Math.cos(angleToPlayer) * newSpeed;
+                            this.vy = Math.sin(angleToPlayer) * newSpeed;
+                        } 
+                    } 
+                    
+                    // ★ 変更点: 後方からの攻撃ロジック
+                    if (!this.isTitleCube && !this.hasRearAttacked && this.vx < 0 && this.x < targetPlayer.x - this.size) {
+                         if (Math.random() < 0.015) { // 少し高めの確率
+                            this.hasRearAttacked = true;
+                            const currentSpeed = Math.sqrt(this.vx**2 + this.vy**2);
+                            const reverseSpeed = currentSpeed * 1.5; // 加速は控えめ
                             const angleToPlayer = Math.atan2(targetPlayer.y - this.y, targetPlayer.x - this.x);
-                            this.vy = Math.sin(angleToPlayer) * this.speed;
-                        }
+                            this.vx = Math.cos(angleToPlayer) * reverseSpeed;
+                            this.vy = Math.sin(angleToPlayer) * reverseSpeed;
+                         }
                     }
-                    this.x -= this.speed * deltaTime;
-                    this.y += this.vy * deltaTime;
-                    this.angle += this.rotationSpeed * deltaTime;
-                }
-            }
 
-            draw() {
-                ctx.save();
-                ctx.strokeStyle = this.color;
-                ctx.lineWidth = 2;
-                ctx.translate(this.x + this.size / 2, this.y + this.size / 2);
-                ctx.rotate(this.angle);
-                ctx.strokeRect(-this.size / 2, -this.size / 2, this.size, this.size);
-                ctx.restore();
+                    this.x += this.vx * deltaTime; 
+                    this.y += this.vy * deltaTime; 
+                    this.angle += this.rotationSpeed * deltaTime; 
+                } 
             }
+            draw() { 
+                ctx.save(); 
+                ctx.strokeStyle = this.state === 'stopped' ? '#00f' : this.color; 
+                ctx.lineWidth = 2; 
+                ctx.translate(this.x + this.size / 2, this.y + this.size / 2); 
+                ctx.rotate(this.angle); ctx.strokeRect(-this.size / 2, -this.size / 2, this.size, this.size); 
+                ctx.restore(); 
+            }
+            stop() { 
+                this.state = 'stopped'; 
+                playSound(kakinSfxBuffer, { volume: 0.8 }); 
+                const particleX = this.x > 0 ? this.x : 0; 
+                createExplosion(particleX, this.y + this.size / 2, 30, ['#ffffff', '#afeeee', '#00ffff']); 
+            }
+        }
 
-            stop() {
-                this.state = 'stopped';
-                this.color = '#00f';
-                const particleX = this.x > 0 ? this.x : 0;
-                createExplosion(particleX, this.y + this.size / 2, 30, ['#ffffff', '#afeeee', '#00ffff']);
-            }
+        // --- ゲームリセット処理 ---
+        function resetGame() {
+            gameState = 'playing';
+            player.visible = true;
+            player.x = 100;
+            player.y = 300;
+            player.speedLevel = 1;
+            player.speed = player.baseSpeed;
+
+            score = 0;
+            stage = 1;
+            cubesSpawnedThisStage = 0;
+            cubeSpeedMultiplier = 1.0;
+            cubeSpawnInterval = 600;
+
+            cubes.length = 0;
+            particles.length = 0;
+
+            playBgm();
         }
 
         // --- ステージ進行処理 ---
-        function getRequiredCubesForStage(currentStage) {
-            return 20 + (currentStage - 1) * 10;
-        }
-
-        function nextStage() {
-            stage++;
-            cubesSpawnedThisStage = 0;
-            cubeSpeedMultiplier *= 1.10;
-
-            for (const cube of cubes) {
-                 const rainbowColors = ['#ff0000', '#ff7f00', '#ffff00', '#00ff00', '#0000ff', '#4b0082', '#9400d3'];
-                 createExplosion(cube.x + cube.size / 2, cube.y + cube.size / 2, 50, rainbowColors, { maxSpeed: 7 });
-            }
-            cubes.length = 0;
-        }
-
+        function getRequiredCubesForStage(currentStage) { return 20 + (currentStage - 1) * 10; }
+        function nextStage() { stage++; cubesSpawnedThisStage = 0; cubeSpeedMultiplier *= 1.10; for (const cube of cubes) { const rainbowColors = ['#ff0000', '#ff7f00', '#ffff00', '#00ff00', '#0000ff', '#4b0082', '#9400d3']; createExplosion(cube.x + cube.size / 2, cube.y + cube.size / 2, 50, rainbowColors, { maxSpeed: 7 }); } cubes.length = 0; }
 
         // --- イベントリスナー ---
-        window.addEventListener('keydown', (e) => {
-            if (!isBgmPlaying) {
-                playBgm();
+        function handleUserInteraction() {
+            if (gameState === 'title' && isAudioReady) {
+                resetGame();
             }
-            if (e.code === 'ControlLeft' && !keys[e.code]) {
-                e.preventDefault();
-                player.changeSpeed();
+        }
+        window.addEventListener('keydown', (e) => { 
+            handleUserInteraction();
+            if(gameState === 'playing') {
+                if (e.code === 'ControlLeft' && !keys[e.code]) { e.preventDefault(); player.changeSpeed(); } 
             }
-            keys[e.code] = true;
+            keys[e.code] = true; 
         });
         window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+        canvas.addEventListener('click', handleUserInteraction);
 
         // --- 当たり判定 ---
-        function checkPlayerCollision() {
-            if (!player.visible) return false;
-            const playerBox = { x: player.x, y: player.y - player.height / 2, width: player.width, height: player.height };
-            for (const cube of cubes) {
-                if (playerBox.x < cube.x + cube.size && playerBox.x + playerBox.width > cube.x &&
-                    playerBox.y < cube.y + cube.size && playerBox.y + playerBox.height > cube.y) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        function checkCubeCollisions(movingCube) {
-            // 壁との衝突
-            if (movingCube.x <= 0) {
-                movingCube.x = 0;
-                return true;
-            }
-            // ★ 変更点: 右の壁との衝突判定を削除
-            /*
-            if (movingCube.x + movingCube.size >= canvas.width) {
-                movingCube.x = canvas.width - movingCube.size;
-                return true;
-            }
-            */
-            if (movingCube.y <= 0) {
-                movingCube.y = 0;
-                return true;
-            }
-            if (movingCube.y + movingCube.size >= canvas.height) {
-                movingCube.y = canvas.height - movingCube.size;
-                return true;
-            }
-
-            // 他の停止したキューブとの衝突
-            for (const stoppedCube of cubes) {
-                if (movingCube !== stoppedCube && stoppedCube.state === 'stopped') {
-                    if (movingCube.x < stoppedCube.x + stoppedCube.size && movingCube.x + movingCube.size > stoppedCube.x &&
-                        movingCube.y < stoppedCube.y + stoppedCube.size && movingCube.y + movingCube.size > stoppedCube.y) {
-                        movingCube.x = stoppedCube.x + stoppedCube.size; 
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
+        function checkPlayerCollision() { if (!player.visible) return false; const playerBox = { x: player.x, y: player.y - player.height / 2, width: player.width, height: player.height }; for (const cube of cubes) { if (playerBox.x < cube.x + cube.size && playerBox.x + playerBox.width > cube.x && playerBox.y < cube.y + cube.size && playerBox.y + playerBox.height > cube.y) { return true; } } return false; }
+        function checkCubeCollisions(movingCube) { if (movingCube.x <= 0) { movingCube.x = 0; return true; } if (movingCube.y <= 0) { movingCube.y = 0; return true; } if (movingCube.y + movingCube.size >= canvas.height) { movingCube.y = canvas.height - movingCube.size; return true; } for (const stoppedCube of cubes) { if (movingCube !== stoppedCube && stoppedCube.state === 'stopped') { if (movingCube.x < stoppedCube.x + stoppedCube.size && movingCube.x + stoppedCube.size > stoppedCube.x && movingCube.y < stoppedCube.y + stoppedCube.size && movingCube.y + movingCube.size > stoppedCube.y) { movingCube.x = stoppedCube.x + stoppedCube.size; return true; } } } return false; }
 
         // --- ゲームロジックの更新 ---
         function update(deltaTime) {
+            if (gameState === 'title') {
+                cubeSpawnTimer += deltaTime * 1000;
+                if (cubeSpawnTimer > 200) {
+                    titleCubes.push(new Cube(true));
+                    cubeSpawnTimer = 0;
+                }
+                for (let i = titleCubes.length - 1; i >= 0; i--) {
+                    titleCubes[i].update(deltaTime, null);
+                    if (titleCubes[i].x + titleCubes[i].size < 0) {
+                        titleCubes.splice(i, 1);
+                    }
+                }
+                blinkTimer += deltaTime;
+                if (blinkTimer > 0.6) {
+                    showBlinkText = !showBlinkText;
+                    blinkTimer = 0;
+                }
+                return;
+            }
+
             if (gameState === 'playing') {
                 score += (10 * stage) * deltaTime;
                 player.update(deltaTime);
-            }
-           
-            if (gameState === 'playing') {
+                
                 cubeSpawnTimer += deltaTime * 1000;
                 if (cubeSpawnTimer > cubeSpawnInterval) {
                     cubes.push(new Cube());
@@ -322,10 +304,19 @@
                     }
                 }
             }
-            
-            for (const cube of cubes) {
+           
+            // ★ 変更点: ループを逆順にし、画面外のキューブを削除する処理を追加
+            for (let i = cubes.length - 1; i >= 0; i--) {
+                const cube = cubes[i];
                 if (cube.state === 'moving') {
-                    cube.update(deltaTime, player); 
+                    cube.update(deltaTime, player);
+
+                    // 右端から出たキューブを削除
+                    if (cube.vx > 0 && cube.x > canvas.width) {
+                        cubes.splice(i, 1);
+                        continue; // 次のキューブへ
+                    }
+                    
                     if (checkCubeCollisions(cube)) {
                         cube.stop();
                     }
@@ -333,11 +324,20 @@
             }
             
             if (gameState === 'playing' && checkPlayerCollision()) {
-                gameState = 'gameOver';
-                stopBgm();
+                gameState = 'exploding';
+                stopBgmWithFadeOut();
+                playSound(bombSfxBuffer, { volume: 1.0 });
                 player.visible = false; 
                 const rainbowColors = ['#ff0000', '#ff7f00', '#ffff00', '#00ff00', '#0000ff', '#4b0082', '#9400d3'];
                 createExplosion(player.x + player.width / 2, player.y, 150, rainbowColors, { maxSpeed: 10 });
+
+                setTimeout(() => {
+                    gameState = 'gameOver';
+                    setTimeout(() => {
+                        gameState = 'title';
+                        titleCubes.length = 0;
+                    }, 3000);
+                }, 2000);
             }
 
             for (let i = particles.length - 1; i >= 0; i--) {
@@ -352,36 +352,66 @@
         function draw() {
             ctx.fillStyle = '#001';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            player.draw();
-            cubes.forEach(cube => cube.draw());
-            particles.forEach(p => p.draw());
+
+            // 背景オブジェクトの描画
+            if (gameState === 'title') {
+                titleCubes.forEach(cube => cube.draw());
+            } else {
+                player.draw();
+                cubes.forEach(cube => cube.draw());
+                particles.forEach(p => p.draw());
+            }
+            
+            // UIを常に表示する
+            const currentScore = (gameState === 'title') ? 0 : Math.floor(score);
+            const currentStage = (gameState === 'title') ? 1 : stage;
+            const currentCubes = (gameState === 'title') ? 0 : cubesSpawnedThisStage;
+            const requiredCubes = (gameState === 'title') ? getRequiredCubesForStage(1) : getRequiredCubesForStage(stage);
+            const speedLevel = (gameState === 'title') ? 1 : player.speedLevel;
 
             ctx.fillStyle = '#fff';
             ctx.font = '24px sans-serif';
-
-            // 左上のUI
             ctx.textAlign = 'left';
-            ctx.fillText(`SCORE: ${Math.floor(score)}`, 20, 40);
-            ctx.fillText(`SPEED: ${player.speedLevel}`, 20, 70);
-            
-            // 右上のUI
+            ctx.fillText(`SCORE: ${currentScore}`, 20, 40);
+            ctx.fillText(`SPEED: ${speedLevel}`, 20, 70);
             ctx.textAlign = 'right';
-            ctx.fillText(`STAGE: ${stage}`, canvas.width - 20, 40);
-            ctx.fillText(`CUBES: ${cubesSpawnedThisStage} / ${getRequiredCubesForStage(stage)}`, canvas.width - 20, 70);
+            ctx.fillText(`STAGE: ${currentStage}`, canvas.width - 20, 40);
+            ctx.fillText(`CUBES: ${currentCubes} / ${requiredCubes}`, canvas.width - 20, 70);
 
 
+            // 画面中央のテキスト
+            switch (gameState) {
+                case 'title':
+                    ctx.font = "bold 80px 'Meiryo', sans-serif";
+                    ctx.fillStyle = '#0ff';
+                    ctx.textAlign = 'center';
+                    ctx.shadowColor = '#0ff';
+                    ctx.shadowBlur = 20;
+                    ctx.fillText('納涼！氷地獄', canvas.width / 2, canvas.height / 2 - 40);
+                    ctx.shadowBlur = 0;
+                    
+                    if (showBlinkText) {
+                        ctx.font = "30px 'Meiryo', sans-serif";
+                        ctx.fillStyle = '#fff';
+                        ctx.fillText('HIT ANY KEY', canvas.width / 2, canvas.height / 2 + 50);
+                    }
+                    info.innerText = 'キーを押してスタート';
+                    break;
+                
+                case 'playing':
+                case 'exploding':
+                case 'gameOver':
+                    info.innerText = '矢印キーで移動 / 左CTRLで速度変更';
+                    break;
+            }
+            
             if (gameState === 'gameOver') {
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.fillStyle = '#f00';
                 ctx.textAlign = 'center';
                 ctx.font = '60px sans-serif';
                 ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2);
                 ctx.font = '30px sans-serif';
                 ctx.fillText(`FINAL SCORE: ${Math.floor(score)}`, canvas.width / 2, canvas.height / 2 + 50);
-                info.innerText = 'リロードして再挑戦';
-            } else {
-                 info.innerText = '矢印キーで移動 / 左CTRLで速度変更';
             }
         }
 
@@ -395,7 +425,7 @@
         }
 
         // --- ゲーム開始 ---
-        setupBGM();
+        setupAudio();
         gameLoop(0);
     </script>
 </body>
